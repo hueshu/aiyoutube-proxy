@@ -124,40 +124,38 @@ app.post('/api/generate/async', async (req, res) => {
         messages: [{ role: 'user', content }]
       };
     } else {
-      // Gemini format
+      // Gemini format - This is an IMAGE EDITING API, not generation!
       if (imageUrl) {
-        // Convert image URL to base64 for Gemini
+        // Gemini requires an input image for editing
         let base64Data = imageUrl;
         if (imageUrl.startsWith('http')) {
           try {
-            console.log('Converting image URL to base64 for Gemini:', imageUrl);
+            console.log('Converting image URL to base64 for Gemini editing:', imageUrl);
             const imageResponse = await fetch(imageUrl);
             const buffer = await imageResponse.arrayBuffer();
             base64Data = Buffer.from(buffer).toString('base64');
             console.log('Successfully converted to base64, length:', base64Data.length);
           } catch (error) {
             console.error('Failed to convert image to base64:', error);
-            // Fall back to using URL directly
-            base64Data = imageUrl;
+            // Cannot proceed without base64 for Gemini
+            throw new Error('Failed to convert image for Gemini editing');
           }
         }
         
+        // Gemini EDITS the provided image based on the prompt
         requestBody = {
           contents: [{
             role: 'user',
             parts: [
-              { text: `${prompt} ${imageSize}` },
+              { text: `Edit this image: ${prompt}. Output size: ${imageSize}` },
               { inline_data: { mime_type: 'image/jpeg', data: base64Data } }
             ]
           }]
         };
       } else {
-        requestBody = {
-          contents: [{
-            role: 'user',
-            parts: [{ text: `${prompt} ${imageSize}` }]
-          }]
-        };
+        // Gemini CANNOT generate images without an input image
+        console.error('Gemini requires an input image for editing. Cannot generate from text only.');
+        throw new Error('Gemini is an image editing API and requires an input image');
       }
     }
 
@@ -321,40 +319,38 @@ app.post('/api/generate', async (req, res) => {
         messages: [{ role: 'user', content }]
       };
     } else {
-      // Gemini format
+      // Gemini format - This is an IMAGE EDITING API, not generation!
       if (imageUrl) {
-        // Convert image URL to base64 for Gemini
+        // Gemini requires an input image for editing
         let base64Data = imageUrl;
         if (imageUrl.startsWith('http')) {
           try {
-            console.log('Converting image URL to base64 for Gemini:', imageUrl);
+            console.log('Converting image URL to base64 for Gemini editing:', imageUrl);
             const imageResponse = await fetch(imageUrl);
             const buffer = await imageResponse.arrayBuffer();
             base64Data = Buffer.from(buffer).toString('base64');
             console.log('Successfully converted to base64, length:', base64Data.length);
           } catch (error) {
             console.error('Failed to convert image to base64:', error);
-            // Fall back to using URL directly
-            base64Data = imageUrl;
+            // Cannot proceed without base64 for Gemini
+            throw new Error('Failed to convert image for Gemini editing');
           }
         }
         
+        // Gemini EDITS the provided image based on the prompt
         requestBody = {
           contents: [{
             role: 'user',
             parts: [
-              { text: `${prompt} ${imageSize}` },
+              { text: `Edit this image: ${prompt}. Output size: ${imageSize}` },
               { inline_data: { mime_type: 'image/jpeg', data: base64Data } }
             ]
           }]
         };
       } else {
-        requestBody = {
-          contents: [{
-            role: 'user',
-            parts: [{ text: `${prompt} ${imageSize}` }]
-          }]
-        };
+        // Gemini CANNOT generate images without an input image
+        console.error('Gemini requires an input image for editing. Cannot generate from text only.');
+        throw new Error('Gemini is an image editing API and requires an input image');
       }
     }
 
