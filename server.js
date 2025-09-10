@@ -212,7 +212,8 @@ app.post('/api/generate/async', async (req, res) => {
       await storeResult(taskId, { success: true, imageUrl: imageUrlResult });
     } else {
       console.error('Failed to extract image URL from response for taskId:', taskId);
-      await storeResult(taskId, { success: false, error: 'No image URL in response' });
+      console.error('Full response data:', JSON.stringify(data, null, 2));
+      await storeResult(taskId, { success: false, error: 'No image URL in response', rawResponse: data });
     }
   } catch (error) {
     console.error('Proxy error for taskId', taskId, ':', error);
