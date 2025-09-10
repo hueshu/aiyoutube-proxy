@@ -172,6 +172,14 @@ app.post('/api/generate/async', async (req, res) => {
     const data = await response.json();
     console.log('API Response for taskId', taskId, ':', JSON.stringify(data, null, 2));
 
+    // Log specific model response
+    if (model === 'gemini-2.5-flash-image-preview') {
+      console.log('Gemini API full response:', JSON.stringify(data));
+      if (data.candidates && data.candidates[0]) {
+        console.log('Gemini candidates[0]:', JSON.stringify(data.candidates[0]));
+      }
+    }
+
     // Extract image URL based on model
     let imageUrlResult = null;
     
