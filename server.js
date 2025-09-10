@@ -85,7 +85,188 @@ async function callAPIWithRetry(apiUrl, requestBody, apiKey, maxRetries = 3) {
   throw lastError || new Error('API call failed after all retries');
 }
 
-// Proxy endpoint for image generation
+// Proxy endpoint for image generation (立即返回，后台处理)
+app.post('/api/generate/async', async (req, res) => {
+  try {
+    const { model, prompt, imageUrl, imageSize, apiKey, taskId } = req.body;
+    
+    if (!apiKey) {
+      return res.status(401).json({ error: 'API key required' });
+    }
+
+    console.log(`Starting async generation with model: ${model}, taskId: ${taskId}`);
+    
+    // 立即返回 taskId，让客户端轮询
+    res.json({ 
+      success: true, 
+      taskId: taskId,
+      message: 'Generation started'
+    });
+    
+    // 后台继续处理（不阻塞响应）
+    const startTime = Date.now();
+
+    // Determine API URL based on model
+    const apiUrl = model === 'sora_image' 
+      ? 'https://yunwu.ai/v1/chat/completions'
+      : 'https://yunwu.ai/v1beta/models/gemini-2.5-flash-image-preview:generateContent';
+
+    // Build request body
+    let requestBody;
+    if (model === 'sora_image') {
+      const content = imageUrl ? [
+        { type: 'text', text: `${prompt} ${imageSize}` },
+        { type: 'image_url', image_url: { url: imageUrl } }
+      ] : `${prompt} ${imageSize}`;
+      
+      requestBody = {
+        model: 'sora_image',
+        messages: [{ role: 'user', content }]
+      };
+    } else {
+      // Gemini format
+      if (imageUrl) {
+        requestBody = {
+          contents: [{
+            role: 'user',
+            parts: [
+              { text: `${prompt} ${imageSize}` },
+              { inline_data: { mime_type: 'image/jpeg', data: imageUrl } }
+            ]
+          }]
+        };
+      } else {
+        requestBody = {
+          contents: [{
+            role: 'user',
+            parts: [{ text: `${prompt} ${imageSize}` }]
+          }]
+        };
+      }
+    }
+
+    console.log('Calling third-party API with retry logic...');
+    
+    // Call API with retry
+    const response = await callAPIWithRetry(apiUrl, requestBody, apiKey);
+    
+    const duration = (Date.now() - startTime) / 1000;
+    console.log(`API responded successfully in ${duration}s for taskId: ${taskId}`);
+
+    const data = await response.json();
+    console.log('API Response for taskId', taskId, ':', JSON.stringify(data, null, 2));
+
+    // Extract image URL based on model
+    let imageUrlResult = null;
+    
+    if (model === 'sora_image') {
+      if (data.choices && data.choices[0]) {
+        const content = data.choices[0].message?.content;
+        if (typeof content === 'string') {
+          const urlMatch = content.match(/https?:\/\/[^\s]+\.(jpg|jpeg|png|webp|gif)/i);
+          if (urlMatch) {
+            imageUrlResult = urlMatch[0];
+          }
+        }
+      }
+    } else {
+      // Gemini response
+      if (data.candidates && data.candidates[0]) {
+        const content = data.candidates[0].content;
+        if (content && content.parts && content.parts[0]) {
+          const text = content.parts[0].text;
+          if (text) {
+            const urlMatch = text.match(/https?:\/\/[^\s]+\.(jpg|jpeg|png|webp|gif)/i);
+            if (urlMatch) {
+              imageUrlResult = urlMatch[0];
+            }
+          }
+        }
+      }
+    }
+
+    // Fallback: check for direct image_url field
+    if (!imageUrlResult && data.image_url) {
+      imageUrlResult = data.image_url;
+    }
+
+    if (imageUrlResult) {
+      console.log('Successfully extracted image URL for taskId', taskId, ':', imageUrlResult);
+      // 存储结果供轮询获取
+      await storeResult(taskId, { success: true, imageUrl: imageUrlResult });
+    } else {
+      console.error('Failed to extract image URL from response for taskId:', taskId);
+      await storeResult(taskId, { success: false, error: 'No image URL in response' });
+    }
+  } catch (error) {
+    console.error('Proxy error for taskId', taskId, ':', error);
+    // 存储错误状态
+    if (taskId) {
+      await storeResult(taskId, { 
+        success: false, 
+        error: error.message || 'Internal server error' 
+      });
+    }
+    
+    // Return appropriate error status
+    if (error.message.includes('timeout')) {
+      res.status(504).json({ 
+        success: false,
+        error: 'Request timeout - API took too long to respond' 
+      });
+    } else if (error.message.includes('API error: 4')) {
+      res.status(400).json({ 
+        success: false,
+        error: error.message 
+      });
+    } else {
+      res.status(500).json({ 
+        success: false,
+        error: error.message || 'Internal server error' 
+      });
+    }
+  }
+});
+
+// 存储结果的简单内存存储（生产环境应该用 Redis 或数据库）
+const results = new Map();
+
+function storeResult(taskId, result) {
+  results.set(taskId, {
+    ...result,
+    timestamp: new Date().toISOString()
+  });
+  // 30分钟后自动清理
+  setTimeout(() => results.delete(taskId), 30 * 60 * 1000);
+}
+
+// 查询结果端点
+app.get('/api/status/:taskId', (req, res) => {
+  const { taskId } = req.params;
+  const result = results.get(taskId);
+  
+  if (!result) {
+    res.json({ 
+      success: false, 
+      status: 'processing',
+      message: 'Still generating...'
+    });
+  } else if (result.success) {
+    res.json({ 
+      success: true,
+      status: 'completed',
+      imageUrl: result.imageUrl 
+    });
+  } else {
+    res.json({ 
+      success: false,
+      status: 'failed',
+      error: result.error 
+    });
+  }
+});
+
+// 同步生成端点（保留兼容性）
 app.post('/api/generate', async (req, res) => {
   try {
     const { model, prompt, imageUrl, imageSize, apiKey } = req.body;
@@ -94,7 +275,7 @@ app.post('/api/generate', async (req, res) => {
       return res.status(401).json({ error: 'API key required' });
     }
 
-    console.log(`Starting generation with model: ${model}`);
+    console.log(`Starting sync generation with model: ${model}`);
     const startTime = Date.now();
 
     // Determine API URL based on model
