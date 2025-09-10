@@ -16,6 +16,75 @@ app.get('/', (req, res) => {
   });
 });
 
+// Helper function to wait
+const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Helper function to make API call with retry
+async function callAPIWithRetry(apiUrl, requestBody, apiKey, maxRetries = 3) {
+  let lastError = null;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`Attempt ${attempt} of ${maxRetries}...`);
+      
+      // Create a new AbortController for each attempt
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3 * 60 * 1000); // 3 minutes per attempt
+      
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`API error on attempt ${attempt}:`, response.status, errorText);
+        lastError = new Error(`API error: ${response.status}`);
+        
+        // Don't retry on client errors (4xx)
+        if (response.status >= 400 && response.status < 500) {
+          throw lastError;
+        }
+        
+        // Wait before retry for server errors
+        if (attempt < maxRetries) {
+          const waitTime = Math.min(1000 * Math.pow(2, attempt), 10000); // Exponential backoff, max 10s
+          console.log(`Waiting ${waitTime}ms before retry...`);
+          await wait(waitTime);
+          continue;
+        }
+      } else {
+        // Success!
+        return response;
+      }
+    } catch (error) {
+      console.error(`Attempt ${attempt} failed:`, error.message);
+      lastError = error;
+      
+      if (error.name === 'AbortError') {
+        console.error('Request timeout');
+        lastError = new Error('Request timeout after 3 minutes');
+      }
+      
+      // Wait before retry
+      if (attempt < maxRetries) {
+        const waitTime = Math.min(1000 * Math.pow(2, attempt), 10000);
+        console.log(`Waiting ${waitTime}ms before retry...`);
+        await wait(waitTime);
+      }
+    }
+  }
+  
+  throw lastError || new Error('API call failed after all retries');
+}
+
 // Proxy endpoint for image generation
 app.post('/api/generate', async (req, res) => {
   try {
@@ -67,35 +136,13 @@ app.post('/api/generate', async (req, res) => {
       }
     }
 
-    console.log('Calling third-party API...');
+    console.log('Calling third-party API with retry logic...');
     
-    // Call third-party API with longer timeout
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000); // 5 minutes timeout
-    
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify(requestBody),
-      signal: controller.signal
-    });
-
-    clearTimeout(timeoutId);
+    // Call API with retry
+    const response = await callAPIWithRetry(apiUrl, requestBody, apiKey);
     
     const duration = (Date.now() - startTime) / 1000;
-    console.log(`API responded in ${duration}s`);
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('API error:', response.status, errorText);
-      return res.status(response.status).json({ 
-        error: `API error: ${response.status}`,
-        details: errorText 
-      });
-    }
+    console.log(`API responded successfully in ${duration}s`);
 
     const data = await response.json();
     console.log('API Response:', JSON.stringify(data, null, 2));
@@ -151,10 +198,20 @@ app.post('/api/generate', async (req, res) => {
   } catch (error) {
     console.error('Proxy error:', error);
     
-    if (error.name === 'AbortError') {
-      res.status(504).json({ error: 'Request timeout after 5 minutes' });
+    // Return appropriate error status
+    if (error.message.includes('timeout')) {
+      res.status(504).json({ 
+        success: false,
+        error: 'Request timeout - API took too long to respond' 
+      });
+    } else if (error.message.includes('API error: 4')) {
+      res.status(400).json({ 
+        success: false,
+        error: error.message 
+      });
     } else {
       res.status(500).json({ 
+        success: false,
         error: error.message || 'Internal server error' 
       });
     }
