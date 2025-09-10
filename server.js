@@ -170,58 +170,75 @@ app.post('/api/generate/async', async (req, res) => {
     console.log(`API responded successfully in ${duration}s for taskId: ${taskId}`);
 
     const data = await response.json();
+    // 保存原始响应
     console.log('API Response for taskId', taskId, ':', JSON.stringify(data, null, 2));
+    
+    // 先存储原始响应，方便调试
+    await storeResult(taskId, { 
+      success: true, 
+      rawResponse: data,
+      timestamp: new Date().toISOString()
+    });
 
-    // Log specific model response
-    if (model === 'gemini-2.5-flash-image-preview') {
-      console.log('Gemini API full response:', JSON.stringify(data));
-      if (data.candidates && data.candidates[0]) {
-        console.log('Gemini candidates[0]:', JSON.stringify(data.candidates[0]));
-      }
-    }
-
-    // Extract image URL based on model
+    // 处理不同模型的响应格式
     let imageUrlResult = null;
     
     if (model === 'sora_image') {
+      // Sora 模型返回格式
       if (data.choices && data.choices[0]) {
         const content = data.choices[0].message?.content;
+        console.log('Sora content:', content);
+        
         if (typeof content === 'string') {
-          const urlMatch = content.match(/https?:\/\/[^\s]+\.(jpg|jpeg|png|webp|gif)/i);
+          // 提取URL - 确保匹配完整的URL
+          const urlMatch = content.match(/https?:\/\/[^\s\]}"']+\.(jpg|jpeg|png|webp|gif)/i);
           if (urlMatch) {
             imageUrlResult = urlMatch[0];
+            console.log('Extracted Sora image URL:', imageUrlResult);
           }
         }
       }
     } else {
-      // Gemini response
+      // Gemini 模型返回格式
+      console.log('Processing Gemini response...');
       if (data.candidates && data.candidates[0]) {
-        const content = data.candidates[0].content;
-        if (content && content.parts && content.parts[0]) {
-          const text = content.parts[0].text;
-          if (text) {
-            const urlMatch = text.match(/https?:\/\/[^\s]+\.(jpg|jpeg|png|webp|gif)/i);
-            if (urlMatch) {
-              imageUrlResult = urlMatch[0];
+        const candidate = data.candidates[0];
+        console.log('Gemini candidate:', JSON.stringify(candidate));
+        
+        if (candidate.content && candidate.content.parts) {
+          for (const part of candidate.content.parts) {
+            if (part.text) {
+              console.log('Gemini text part:', part.text);
+              // 从文本中提取图片URL
+              const urlMatch = part.text.match(/https?:\/\/[^\s\]}"']+\.(jpg|jpeg|png|webp|gif)/i);
+              if (urlMatch) {
+                imageUrlResult = urlMatch[0];
+                console.log('Extracted Gemini image URL:', imageUrlResult);
+                break;
+              }
             }
           }
         }
       }
     }
 
-    // Fallback: check for direct image_url field
-    if (!imageUrlResult && data.image_url) {
-      imageUrlResult = data.image_url;
-    }
-
+    // 最终结果处理
     if (imageUrlResult) {
       console.log('Successfully extracted image URL for taskId', taskId, ':', imageUrlResult);
-      // 存储结果供轮询获取
-      await storeResult(taskId, { success: true, imageUrl: imageUrlResult });
+      // 更新存储结果
+      await storeResult(taskId, { 
+        success: true, 
+        imageUrl: imageUrlResult,
+        rawResponse: data 
+      });
     } else {
       console.error('Failed to extract image URL from response for taskId:', taskId);
       console.error('Full response data:', JSON.stringify(data, null, 2));
-      await storeResult(taskId, { success: false, error: 'No image URL in response', rawResponse: data });
+      await storeResult(taskId, { 
+        success: false, 
+        error: 'No image URL in response', 
+        rawResponse: data 
+      });
     }
   } catch (error) {
     console.error('Proxy error for taskId', taskId, ':', error);
@@ -369,46 +386,56 @@ app.post('/api/generate', async (req, res) => {
     const data = await response.json();
     console.log('API Response:', JSON.stringify(data, null, 2));
 
-    // Extract image URL based on model
+    // 处理不同模型的响应格式
     let imageUrlResult = null;
     
     if (model === 'sora_image') {
+      // Sora 模型返回格式
       if (data.choices && data.choices[0]) {
         const content = data.choices[0].message?.content;
+        console.log('Sora content:', content);
+        
         if (typeof content === 'string') {
-          const urlMatch = content.match(/https?:\/\/[^\s]+\.(jpg|jpeg|png|webp|gif)/i);
+          // 提取URL - 确保匹配完整的URL
+          const urlMatch = content.match(/https?:\/\/[^\s\]}"']+\.(jpg|jpeg|png|webp|gif)/i);
           if (urlMatch) {
             imageUrlResult = urlMatch[0];
+            console.log('Extracted Sora image URL:', imageUrlResult);
           }
         }
       }
     } else {
-      // Gemini response
+      // Gemini 模型返回格式
+      console.log('Processing Gemini response...');
       if (data.candidates && data.candidates[0]) {
-        const content = data.candidates[0].content;
-        if (content && content.parts && content.parts[0]) {
-          const text = content.parts[0].text;
-          if (text) {
-            const urlMatch = text.match(/https?:\/\/[^\s]+\.(jpg|jpeg|png|webp|gif)/i);
-            if (urlMatch) {
-              imageUrlResult = urlMatch[0];
+        const candidate = data.candidates[0];
+        console.log('Gemini candidate:', JSON.stringify(candidate));
+        
+        if (candidate.content && candidate.content.parts) {
+          for (const part of candidate.content.parts) {
+            if (part.text) {
+              console.log('Gemini text part:', part.text);
+              // 从文本中提取图片URL
+              const urlMatch = part.text.match(/https?:\/\/[^\s\]}"']+\.(jpg|jpeg|png|webp|gif)/i);
+              if (urlMatch) {
+                imageUrlResult = urlMatch[0];
+                console.log('Extracted Gemini image URL:', imageUrlResult);
+                break;
+              }
             }
           }
         }
       }
     }
 
-    // Fallback: check for direct image_url field
-    if (!imageUrlResult && data.image_url) {
-      imageUrlResult = data.image_url;
-    }
-
+    // 最终结果处理
     if (imageUrlResult) {
       console.log('Successfully extracted image URL:', imageUrlResult);
       res.json({ 
         success: true, 
         imageUrl: imageUrlResult,
-        duration: duration 
+        duration: duration,
+        rawResponse: data 
       });
     } else {
       console.error('Failed to extract image URL from response');
