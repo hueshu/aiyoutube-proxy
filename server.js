@@ -126,12 +126,28 @@ app.post('/api/generate/async', async (req, res) => {
     } else {
       // Gemini format
       if (imageUrl) {
+        // Convert image URL to base64 for Gemini
+        let base64Data = imageUrl;
+        if (imageUrl.startsWith('http')) {
+          try {
+            console.log('Converting image URL to base64 for Gemini:', imageUrl);
+            const imageResponse = await fetch(imageUrl);
+            const buffer = await imageResponse.arrayBuffer();
+            base64Data = Buffer.from(buffer).toString('base64');
+            console.log('Successfully converted to base64, length:', base64Data.length);
+          } catch (error) {
+            console.error('Failed to convert image to base64:', error);
+            // Fall back to using URL directly
+            base64Data = imageUrl;
+          }
+        }
+        
         requestBody = {
           contents: [{
             role: 'user',
             parts: [
               { text: `${prompt} ${imageSize}` },
-              { inline_data: { mime_type: 'image/jpeg', data: imageUrl } }
+              { inline_data: { mime_type: 'image/jpeg', data: base64Data } }
             ]
           }]
         };
@@ -298,12 +314,28 @@ app.post('/api/generate', async (req, res) => {
     } else {
       // Gemini format
       if (imageUrl) {
+        // Convert image URL to base64 for Gemini
+        let base64Data = imageUrl;
+        if (imageUrl.startsWith('http')) {
+          try {
+            console.log('Converting image URL to base64 for Gemini:', imageUrl);
+            const imageResponse = await fetch(imageUrl);
+            const buffer = await imageResponse.arrayBuffer();
+            base64Data = Buffer.from(buffer).toString('base64');
+            console.log('Successfully converted to base64, length:', base64Data.length);
+          } catch (error) {
+            console.error('Failed to convert image to base64:', error);
+            // Fall back to using URL directly
+            base64Data = imageUrl;
+          }
+        }
+        
         requestBody = {
           contents: [{
             role: 'user',
             parts: [
               { text: `${prompt} ${imageSize}` },
-              { inline_data: { mime_type: 'image/jpeg', data: imageUrl } }
+              { inline_data: { mime_type: 'image/jpeg', data: base64Data } }
             ]
           }]
         };
