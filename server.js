@@ -203,18 +203,29 @@ app.post('/api/generate/async', async (req, res) => {
       console.log('Processing Gemini response...');
       if (data.candidates && data.candidates[0]) {
         const candidate = data.candidates[0];
-        console.log('Gemini candidate:', JSON.stringify(candidate));
+        console.log('Gemini candidate preview:', JSON.stringify(candidate).substring(0, 500) + '...');
         
         if (candidate.content && candidate.content.parts) {
           for (const part of candidate.content.parts) {
-            if (part.text) {
+            // 检查是否有base64图片数据（Gemini返回的格式）
+            if (part.inlineData && part.inlineData.data && part.inlineData.mimeType) {
+              console.log('Found Gemini base64 image data with mimeType:', part.inlineData.mimeType);
+              
+              // 将base64数据保存为data URL
+              const base64Data = part.inlineData.data;
+              const mimeType = part.inlineData.mimeType;
+              imageUrlResult = `data:${mimeType};base64,${base64Data}`;
+              console.log('Created data URL for Gemini image (length):', imageUrlResult.length);
+              break;
+            }
+            // 如果有文本，也记录下来
+            else if (part.text) {
               console.log('Gemini text part:', part.text);
-              // 从文本中提取图片URL
+              // 尝试从文本中提取图片URL（备用）
               const urlMatch = part.text.match(/https?:\/\/[^\s\]}"']+\.(jpg|jpeg|png|webp|gif)/i);
-              if (urlMatch) {
+              if (urlMatch && !imageUrlResult) {
                 imageUrlResult = urlMatch[0];
-                console.log('Extracted Gemini image URL:', imageUrlResult);
-                break;
+                console.log('Extracted Gemini image URL from text:', imageUrlResult);
               }
             }
           }
@@ -409,18 +420,29 @@ app.post('/api/generate', async (req, res) => {
       console.log('Processing Gemini response...');
       if (data.candidates && data.candidates[0]) {
         const candidate = data.candidates[0];
-        console.log('Gemini candidate:', JSON.stringify(candidate));
+        console.log('Gemini candidate preview:', JSON.stringify(candidate).substring(0, 500) + '...');
         
         if (candidate.content && candidate.content.parts) {
           for (const part of candidate.content.parts) {
-            if (part.text) {
+            // 检查是否有base64图片数据（Gemini返回的格式）
+            if (part.inlineData && part.inlineData.data && part.inlineData.mimeType) {
+              console.log('Found Gemini base64 image data with mimeType:', part.inlineData.mimeType);
+              
+              // 将base64数据保存为data URL
+              const base64Data = part.inlineData.data;
+              const mimeType = part.inlineData.mimeType;
+              imageUrlResult = `data:${mimeType};base64,${base64Data}`;
+              console.log('Created data URL for Gemini image (length):', imageUrlResult.length);
+              break;
+            }
+            // 如果有文本，也记录下来
+            else if (part.text) {
               console.log('Gemini text part:', part.text);
-              // 从文本中提取图片URL
+              // 尝试从文本中提取图片URL（备用）
               const urlMatch = part.text.match(/https?:\/\/[^\s\]}"']+\.(jpg|jpeg|png|webp|gif)/i);
-              if (urlMatch) {
+              if (urlMatch && !imageUrlResult) {
                 imageUrlResult = urlMatch[0];
-                console.log('Extracted Gemini image URL:', imageUrlResult);
-                break;
+                console.log('Extracted Gemini image URL from text:', imageUrlResult);
               }
             }
           }
