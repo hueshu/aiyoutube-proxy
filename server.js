@@ -1,23 +1,129 @@
 const express = require('express');
 const cors = require('cors');
+const dns = require('dns').promises;
+const os = require('os');
+const http = require('http');
+const https = require('https');
+
+// 优化连接池配置：因为并发=1，不需要太大的连接池
+http.globalAgent.maxSockets = 10;
+https.globalAgent.maxSockets = 10;
+http.globalAgent.keepAlive = true;
+https.globalAgent.keepAlive = true;
+http.globalAgent.keepAliveMsecs = 1000;
+https.globalAgent.keepAliveMsecs = 1000;
+
 const app = express();
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
+
+// Pre-warm DNS cache for Cloudflare Workers domain
+const CLOUDFLARE_WORKER_DOMAIN = 'aiyoutube-backend-prod.hueshu.workers.dev';
+
+// Pre-resolve DNS on startup to warm the cache
+(async () => {
+  try {
+    const addresses = await dns.resolve4(CLOUDFLARE_WORKER_DOMAIN);
+    if (addresses && addresses.length > 0) {
+      console.log(`DNS cache warmed for ${CLOUDFLARE_WORKER_DOMAIN}: ${addresses[0]}`);
+    }
+  } catch (error) {
+    console.log(`DNS pre-resolution failed:`, error.message);
+  }
+})();
 
 // Health check
 app.get('/', (req, res) => {
   res.json({ 
     status: 'healthy', 
     service: 'AI Image Generation Proxy',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    dnsPreResolved: !!cloudflareWorkerHost
   });
 });
 
 // Helper function to wait
 const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Optimized callback function using fetch for better performance in container environments
+// fetch performs much better than https.request in GCR containers (55-500ms vs 15-22s)
+async function sendCallback(callbackUrl, data) {
+  try {
+    // Create AbortController for timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 seconds timeout
+    
+    const response = await fetch(callbackUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify(data),
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    
+    // Don't wait for response body - just check status
+    // This allows Workers to return immediately without us waiting for body
+    return {
+      ok: response.ok,
+      status: response.status,
+      text: async () => 'Response not read to improve callback speed'
+    };
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error('Request timeout after 30 seconds');
+    }
+    throw error;
+  }
+}
+
+// Helper function to get system resource usage
+function getResourceUsage() {
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  const usedMem = totalMem - freeMem;
+  const memUsagePercent = ((usedMem / totalMem) * 100).toFixed(2);
+  
+  // CPU usage calculation
+  const cpus = os.cpus();
+  let totalIdle = 0;
+  let totalTick = 0;
+  
+  cpus.forEach(cpu => {
+    for (type in cpu.times) {
+      totalTick += cpu.times[type];
+    }
+    totalIdle += cpu.times.idle;
+  });
+  
+  const idle = totalIdle / cpus.length;
+  const total = totalTick / cpus.length;
+  const cpuUsagePercent = (100 - ~~(100 * idle / total)).toFixed(2);
+  
+  return {
+    memoryMB: {
+      total: (totalMem / 1024 / 1024).toFixed(0),
+      used: (usedMem / 1024 / 1024).toFixed(0),
+      free: (freeMem / 1024 / 1024).toFixed(0),
+      percent: memUsagePercent
+    },
+    cpu: {
+      cores: cpus.length,
+      percent: cpuUsagePercent
+    },
+    loadAvg: os.loadavg().map(v => v.toFixed(2))
+  };
+}
+
+// Track active tasks
+let activeTasks = 0;
+let totalProcessed = 0;
 
 // Helper function to make API call with retry
 async function callAPIWithRetry(apiUrl, requestBody, apiKey, maxRetries = 3) {
@@ -29,7 +135,7 @@ async function callAPIWithRetry(apiUrl, requestBody, apiKey, maxRetries = 3) {
       
       // Create a new AbortController for each attempt
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3 * 60 * 1000); // 3 minutes per attempt
+      const timeoutId = setTimeout(() => controller.abort(), 4 * 60 * 1000); // 4 minutes per attempt
       
       const response = await fetch(apiUrl, {
         method: 'POST',
@@ -46,7 +152,24 @@ async function callAPIWithRetry(apiUrl, requestBody, apiKey, maxRetries = 3) {
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`API error on attempt ${attempt}:`, response.status, errorText);
-        lastError = new Error(`API error: ${response.status}`);
+        
+        // Parse error text if it's JSON
+        let errorMessage = `API error: ${response.status}`;
+        try {
+          const errorData = JSON.parse(errorText);
+          // Extract error message from various possible formats
+          errorMessage = errorData.error || errorData.message || errorData.error_description || errorText;
+        } catch (e) {
+          // If not JSON, use the raw text
+          errorMessage = errorText || `API error: ${response.status}`;
+        }
+        
+        // Include full response in error message instead of as a property
+        if (errorText && errorText !== errorMessage) {
+          errorMessage = `${errorMessage}\n\nFull Response: ${errorText}`;
+        }
+        
+        lastError = new Error(errorMessage);
         
         // Don't retry on client errors (4xx)
         if (response.status >= 400 && response.status < 500) {
@@ -70,7 +193,7 @@ async function callAPIWithRetry(apiUrl, requestBody, apiKey, maxRetries = 3) {
       
       if (error.name === 'AbortError') {
         console.error('Request timeout');
-        lastError = new Error('Request timeout after 3 minutes');
+        lastError = new Error('Request timeout after 4 minutes');
       }
       
       // Wait before retry
@@ -85,16 +208,64 @@ async function callAPIWithRetry(apiUrl, requestBody, apiKey, maxRetries = 3) {
   throw lastError || new Error('API call failed after all retries');
 }
 
+// Test endpoint to measure callback speed from GCR to Cloudflare
+app.get('/api/test-callback', async (req, res) => {
+  console.log('Testing callback speed to Cloudflare Workers...');
+  const startTime = Date.now();
+  
+  try {
+    const testUrl = 'https://aiyoutube-backend-prod.hueshu.workers.dev/api/v1/generation/callback';
+    
+    const response = await fetch(testUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        taskId: `speed-test-${Date.now()}`,
+        parentTaskId: 'test',
+        status: 'test',
+        imageUrl: 'https://example.com/test.jpg'
+      })
+    });
+    
+    const elapsed = Date.now() - startTime;
+    const responseText = await response.text();
+    
+    console.log(`Callback test completed in ${elapsed}ms`);
+    
+    res.json({
+      success: true,
+      elapsed_ms: elapsed,
+      response_status: response.status,
+      response_body: responseText,
+      test_time: new Date().toISOString()
+    });
+  } catch (error) {
+    const elapsed = Date.now() - startTime;
+    console.error(`Callback test failed after ${elapsed}ms:`, error.message);
+    
+    res.status(500).json({
+      success: false,
+      elapsed_ms: elapsed,
+      error: error.message
+    });
+  }
+});
+
 // Proxy endpoint for image generation (立即返回，后台处理)
 app.post('/api/generate/async', async (req, res) => {
   try {
-    const { model, prompt, imageUrl, imageSize, apiKey, taskId } = req.body;
+    const { model, prompt, imageUrl, imageUrls, imageSize, apiKey, taskId, parentTaskId, callbackUrl } = req.body;
     
     if (!apiKey) {
       return res.status(401).json({ error: 'API key required' });
     }
 
     console.log(`Starting async generation with model: ${model}, taskId: ${taskId}`);
+    if (callbackUrl) {
+      console.log(`Will callback to: ${callbackUrl}`);
+    }
     
     // 立即返回 taskId，让客户端轮询
     res.json({ 
@@ -103,25 +274,58 @@ app.post('/api/generate/async', async (req, res) => {
       message: 'Generation started'
     });
     
-    // 后台继续处理（不阻塞响应）
-    const startTime = Date.now();
+    // 使用 setImmediate 确保响应先发送，然后在下一个事件循环中处理
+    setImmediate(async () => {
+      try {
+        await processGeneration(model, prompt, imageUrl, imageUrls, imageSize, apiKey, taskId, parentTaskId, callbackUrl);
+      } catch (error) {
+        console.error('Background processing error:', error);
+      }
+    });
+  } catch (error) {
+    console.error('Async endpoint error:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// 将后台处理逻辑移到独立函数
+async function processGeneration(model, prompt, imageUrl, imageUrls, imageSize, apiKey, taskId, parentTaskId, callbackUrl) {
+  const startTime = Date.now();  // Move outside try block for finally block access
+  try {
+    activeTasks++;
+    totalProcessed++;
+    
+    // Log resource usage at start
+    const startResources = getResourceUsage();
+    console.log(`[RESOURCE_START] Task ${taskId} | Active: ${activeTasks} | Total: ${totalProcessed} | Memory: ${startResources.memoryMB.used}/${startResources.memoryMB.total}MB (${startResources.memoryMB.percent}%) | CPU: ${startResources.cpu.percent}% | Load: [${startResources.loadAvg.join(', ')}]`);
 
     // Determine API URL based on model
     const apiUrl = model === 'sora_image' 
-      ? 'https://yunwu.ai/v1/chat/completions'
-      : 'https://yunwu.ai/v1beta/models/gemini-2.5-flash-image-preview:generateContent';
+      ? 'https://yunwu.zeabur.app/v1/chat/completions'
+      : 'https://yunwu.zeabur.app/v1beta/models/gemini-2.5-flash-image-preview:generateContent';
 
+    // Handle multiple image URLs - prioritize imageUrls array, fallback to single imageUrl
+    const allImageUrls = imageUrls || (imageUrl ? [imageUrl] : []);
+    console.log(`Processing generation with ${allImageUrls.length} images`);
+    
     // Build request body
     let requestBody;
     if (model === 'sora_image') {
-      const content = imageUrl ? [
-        { type: 'text', text: `${prompt} ${imageSize}` },
-        { type: 'image_url', image_url: { url: imageUrl } }
-      ] : `${prompt} ${imageSize}`;
+      // Build content array with all images
+      const content = [];
+      content.push({ type: 'text', text: `${prompt} ${imageSize}` });
+      
+      // Add all images to the content
+      for (const imgUrl of allImageUrls) {
+        content.push({ type: 'image_url', image_url: { url: imgUrl } });
+      }
+      
+      // If no images, just use text
+      const finalContent = allImageUrls.length > 0 ? content : `${prompt} ${imageSize}`;
       
       requestBody = {
         model: 'sora_image',
-        messages: [{ role: 'user', content }]
+        messages: [{ role: 'user', content: finalContent }]
       };
     } else {
       // Gemini format
@@ -236,67 +440,182 @@ app.post('/api/generate/async', async (req, res) => {
     // 最终结果处理
     if (imageUrlResult) {
       console.log('Successfully extracted image URL for taskId', taskId, ':', imageUrlResult);
+      
       // 更新存储结果
       await storeResult(taskId, { 
         success: true, 
         imageUrl: imageUrlResult,
         rawResponse: data 
       });
+      
+      // 如果有回调URL，发送回调
+      if (callbackUrl) {
+        const callbackStartTime = Date.now();  // 使用不同的变量名避免作用域混淆
+        try {
+          console.log(`[${new Date().toISOString()}] Starting callback to ${callbackUrl} for task ${taskId}`);
+          
+          // Use https module with connection pool
+          const callbackResponse = await sendCallback(callbackUrl, {
+            taskId: taskId,
+            parentTaskId: parentTaskId,
+            status: 'completed',
+            imageUrl: imageUrlResult
+          });
+          const elapsed = Date.now() - callbackStartTime;
+          console.log(`[${new Date().toISOString()}] Callback completed for task ${taskId}, status: ${callbackResponse.status}, took ${elapsed}ms`);
+        } catch (callbackError) {
+          const elapsed = Date.now() - callbackStartTime;
+          console.error(`[${new Date().toISOString()}] Failed to send callback after ${elapsed}ms:`, callbackError.message);
+          if (callbackError.name === 'AbortError') {
+            console.error('Callback timed out after 30 seconds');
+          }
+        }
+      }
     } else {
       console.error('Failed to extract image URL from response for taskId:', taskId);
       console.error('Full response data:', JSON.stringify(data, null, 2));
+      
+      // Extract error message from API response
+      let errorMessage = 'No image URL in response';
+      
+      // Try to extract error from Sora API response
+      if (data.choices && data.choices[0] && data.choices[0].message) {
+        const content = data.choices[0].message.content;
+        if (typeof content === 'string') {
+          // Extract failure reason from content (e.g., "生成失败 ❌\n失败原因：input_moderation")
+          if (content.includes('生成失败')) {
+            errorMessage = content;  // Use the full error message from API
+          }
+        }
+      }
+      
       await storeResult(taskId, { 
         success: false, 
-        error: 'No image URL in response', 
+        error: errorMessage, 
         rawResponse: data 
       });
+      
+      // 发送失败回调
+      if (callbackUrl) {
+        const callbackStartTime = Date.now();
+        try {
+          console.log(`[${new Date().toISOString()}] Sending failure callback to ${callbackUrl} for task ${taskId}`);
+          
+          await sendCallback(callbackUrl, {
+            taskId: taskId,
+            parentTaskId: parentTaskId,
+            status: 'failed',
+            error: errorMessage
+          });
+          const elapsed = Date.now() - callbackStartTime;
+          console.log(`[${new Date().toISOString()}] Failure callback completed in ${elapsed}ms`);
+        } catch (callbackError) {
+          const elapsed = Date.now() - callbackStartTime;
+          console.error(`Failed to send failure callback after ${elapsed}ms:`, callbackError.message);
+        }
+      }
     }
   } catch (error) {
     console.error('Proxy error for taskId', taskId, ':', error);
+    
+    // Get error message - it already includes full response if we modified it above
+    const errorMessage = error.message || 'Internal server error';
+    
     // 存储错误状态
     if (taskId) {
       await storeResult(taskId, { 
         success: false, 
-        error: error.message || 'Internal server error' 
+        error: errorMessage,
+        timestamp: new Date().toISOString()
       });
+      
+      // 发送错误回调
+      if (callbackUrl) {
+        const callbackStartTime = Date.now();
+        try {
+          console.log(`[${new Date().toISOString()}] Sending error callback to ${callbackUrl} for task ${taskId}`);
+          
+          await sendCallback(callbackUrl, {
+            taskId: taskId,
+            parentTaskId: parentTaskId,
+            status: 'failed',
+            error: errorMessage
+          });
+          const elapsed = Date.now() - callbackStartTime;
+          console.log(`[${new Date().toISOString()}] Error callback completed in ${elapsed}ms`);
+        } catch (callbackError) {
+          const elapsed = Date.now() - callbackStartTime;
+          console.error(`Failed to send error callback after ${elapsed}ms:`, callbackError.message);
+        }
+      }
     }
     
-    // Return appropriate error status
-    if (error.message.includes('timeout')) {
-      res.status(504).json({ 
-        success: false,
-        error: 'Request timeout - API took too long to respond' 
-      });
-    } else if (error.message.includes('API error: 4')) {
-      res.status(400).json({ 
-        success: false,
-        error: error.message 
-      });
-    } else {
-      res.status(500).json({ 
-        success: false,
-        error: error.message || 'Internal server error' 
-      });
+    // Note: Response already sent, so we can't send error response here
+    // The error is stored and will be available via status endpoint
+  } finally {
+    // Log resource usage at end
+    activeTasks--;
+    const endResources = getResourceUsage();
+    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.log(`[RESOURCE_END] Task ${taskId} | Duration: ${duration}s | Active: ${activeTasks} | Memory: ${endResources.memoryMB.used}/${endResources.memoryMB.total}MB (${endResources.memoryMB.percent}%) | CPU: ${endResources.cpu.percent}% | Load: [${endResources.loadAvg.join(', ')}]`);
+    
+    // Warning if resources are high
+    if (parseFloat(endResources.memoryMB.percent) > 80) {
+      console.warn(`[RESOURCE_WARNING] High memory usage: ${endResources.memoryMB.percent}%`);
+    }
+    if (parseFloat(endResources.cpu.percent) > 80) {
+      console.warn(`[RESOURCE_WARNING] High CPU usage: ${endResources.cpu.percent}%`);
+    }
+    if (activeTasks > 50) {
+      console.warn(`[RESOURCE_WARNING] High concurrent tasks: ${activeTasks}`);
     }
   }
-});
+}
 
-// 存储结果的简单内存存储（生产环境应该用 Redis 或数据库）
-const results = new Map();
+// 使用文件系统存储结果（简单的持久化方案）
+const fs = require('fs').promises;
+const path = require('path');
 
-function storeResult(taskId, result) {
-  results.set(taskId, {
-    ...result,
-    timestamp: new Date().toISOString()
-  });
-  // 30分钟后自动清理
-  setTimeout(() => results.delete(taskId), 30 * 60 * 1000);
+// 创建临时存储目录
+const STORAGE_DIR = path.join('/tmp', 'aiyoutube-results');
+fs.mkdir(STORAGE_DIR, { recursive: true }).catch(console.error);
+
+async function storeResult(taskId, result) {
+  try {
+    const filePath = path.join(STORAGE_DIR, `${taskId}.json`);
+    await fs.writeFile(filePath, JSON.stringify({
+      ...result,
+      timestamp: new Date().toISOString()
+    }));
+    
+    // 30分钟后自动清理
+    setTimeout(async () => {
+      try {
+        await fs.unlink(filePath);
+      } catch (err) {
+        // File might already be deleted
+      }
+    }, 30 * 60 * 1000);
+  } catch (error) {
+    console.error('Failed to store result:', error);
+  }
+}
+
+async function getResult(taskId) {
+  try {
+    const filePath = path.join(STORAGE_DIR, `${taskId}.json`);
+    const data = await fs.readFile(filePath, 'utf8');
+    return JSON.parse(data);
+  } catch (error) {
+    // File doesn't exist or error reading
+    return null;
+  }
 }
 
 // 查询结果端点
-app.get('/api/status/:taskId', (req, res) => {
+app.get('/api/status/:taskId', async (req, res) => {
   const { taskId } = req.params;
-  const result = results.get(taskId);
+  const result = await getResult(taskId);
   
   if (!result) {
     res.json({ 
@@ -333,20 +652,31 @@ app.post('/api/generate', async (req, res) => {
 
     // Determine API URL based on model
     const apiUrl = model === 'sora_image' 
-      ? 'https://yunwu.ai/v1/chat/completions'
-      : 'https://yunwu.ai/v1beta/models/gemini-2.5-flash-image-preview:generateContent';
+      ? 'https://yunwu.zeabur.app/v1/chat/completions'
+      : 'https://yunwu.zeabur.app/v1beta/models/gemini-2.5-flash-image-preview:generateContent';
 
+    // Handle multiple image URLs - prioritize imageUrls array, fallback to single imageUrl
+    const allImageUrls = imageUrls || (imageUrl ? [imageUrl] : []);
+    console.log(`Processing generation with ${allImageUrls.length} images`);
+    
     // Build request body
     let requestBody;
     if (model === 'sora_image') {
-      const content = imageUrl ? [
-        { type: 'text', text: `${prompt} ${imageSize}` },
-        { type: 'image_url', image_url: { url: imageUrl } }
-      ] : `${prompt} ${imageSize}`;
+      // Build content array with all images
+      const content = [];
+      content.push({ type: 'text', text: `${prompt} ${imageSize}` });
+      
+      // Add all images to the content
+      for (const imgUrl of allImageUrls) {
+        content.push({ type: 'image_url', image_url: { url: imgUrl } });
+      }
+      
+      // If no images, just use text
+      const finalContent = allImageUrls.length > 0 ? content : `${prompt} ${imageSize}`;
       
       requestBody = {
         model: 'sora_image',
-        messages: [{ role: 'user', content }]
+        messages: [{ role: 'user', content: finalContent }]
       };
     } else {
       // Gemini format
@@ -489,6 +819,6 @@ app.post('/api/generate', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Proxy server running on port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Proxy server running on http://0.0.0.0:${PORT}`);
 });
