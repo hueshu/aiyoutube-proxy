@@ -256,16 +256,15 @@ app.get('/api/test-callback', async (req, res) => {
 // Proxy endpoint for image generation (立即返回，后台处理)
 app.post('/api/generate/async', async (req, res) => {
   try {
-    const { model, prompt, imageUrl, imageUrls, imageSize, apiKey, taskId, parentTaskId, callbackUrl } = req.body;
+    const { model, prompt, imageUrl, imageUrls, imageSize, apiKey, taskId, parentTaskId } = req.body;
+    // callbackUrl removed - using polling instead
     
     if (!apiKey) {
       return res.status(401).json({ error: 'API key required' });
     }
 
     console.log(`Starting async generation with model: ${model}, taskId: ${taskId}`);
-    if (callbackUrl) {
-      console.log(`Will callback to: ${callbackUrl}`);
-    }
+    // Callback logging removed - using polling instead
     
     // 立即返回 taskId，让客户端轮询
     res.json({ 
@@ -277,7 +276,7 @@ app.post('/api/generate/async', async (req, res) => {
     // 使用 setImmediate 确保响应先发送，然后在下一个事件循环中处理
     setImmediate(async () => {
       try {
-        await processGeneration(model, prompt, imageUrl, imageUrls, imageSize, apiKey, taskId, parentTaskId, callbackUrl);
+        await processGeneration(model, prompt, imageUrl, imageUrls, imageSize, apiKey, taskId, parentTaskId);
       } catch (error) {
         console.error('Background processing error:', error);
       }
@@ -289,7 +288,7 @@ app.post('/api/generate/async', async (req, res) => {
 });
 
 // 将后台处理逻辑移到独立函数
-async function processGeneration(model, prompt, imageUrl, imageUrls, imageSize, apiKey, taskId, parentTaskId, callbackUrl) {
+async function processGeneration(model, prompt, imageUrl, imageUrls, imageSize, apiKey, taskId, parentTaskId) {
   const startTime = Date.now();  // Move outside try block for finally block access
   try {
     activeTasks++;
@@ -448,29 +447,8 @@ async function processGeneration(model, prompt, imageUrl, imageUrls, imageSize, 
         rawResponse: data 
       });
       
-      // 如果有回调URL，发送回调
-      if (callbackUrl) {
-        const callbackStartTime = Date.now();  // 使用不同的变量名避免作用域混淆
-        try {
-          console.log(`[${new Date().toISOString()}] Starting callback to ${callbackUrl} for task ${taskId}`);
-          
-          // Use https module with connection pool
-          const callbackResponse = await sendCallback(callbackUrl, {
-            taskId: taskId,
-            parentTaskId: parentTaskId,
-            status: 'completed',
-            imageUrl: imageUrlResult
-          });
-          const elapsed = Date.now() - callbackStartTime;
-          console.log(`[${new Date().toISOString()}] Callback completed for task ${taskId}, status: ${callbackResponse.status}, took ${elapsed}ms`);
-        } catch (callbackError) {
-          const elapsed = Date.now() - callbackStartTime;
-          console.error(`[${new Date().toISOString()}] Failed to send callback after ${elapsed}ms:`, callbackError.message);
-          if (callbackError.name === 'AbortError') {
-            console.error('Callback timed out after 30 seconds');
-          }
-        }
-      }
+      // Callback removed - using polling instead
+      // Workers will poll /api/status/:taskId to get the result
     } else {
       console.error('Failed to extract image URL from response for taskId:', taskId);
       console.error('Full response data:', JSON.stringify(data, null, 2));
@@ -495,25 +473,7 @@ async function processGeneration(model, prompt, imageUrl, imageUrls, imageSize, 
         rawResponse: data 
       });
       
-      // 发送失败回调
-      if (callbackUrl) {
-        const callbackStartTime = Date.now();
-        try {
-          console.log(`[${new Date().toISOString()}] Sending failure callback to ${callbackUrl} for task ${taskId}`);
-          
-          await sendCallback(callbackUrl, {
-            taskId: taskId,
-            parentTaskId: parentTaskId,
-            status: 'failed',
-            error: errorMessage
-          });
-          const elapsed = Date.now() - callbackStartTime;
-          console.log(`[${new Date().toISOString()}] Failure callback completed in ${elapsed}ms`);
-        } catch (callbackError) {
-          const elapsed = Date.now() - callbackStartTime;
-          console.error(`Failed to send failure callback after ${elapsed}ms:`, callbackError.message);
-        }
-      }
+      // Failure callback removed - using polling instead
     }
   } catch (error) {
     console.error('Proxy error for taskId', taskId, ':', error);
@@ -529,25 +489,7 @@ async function processGeneration(model, prompt, imageUrl, imageUrls, imageSize, 
         timestamp: new Date().toISOString()
       });
       
-      // 发送错误回调
-      if (callbackUrl) {
-        const callbackStartTime = Date.now();
-        try {
-          console.log(`[${new Date().toISOString()}] Sending error callback to ${callbackUrl} for task ${taskId}`);
-          
-          await sendCallback(callbackUrl, {
-            taskId: taskId,
-            parentTaskId: parentTaskId,
-            status: 'failed',
-            error: errorMessage
-          });
-          const elapsed = Date.now() - callbackStartTime;
-          console.log(`[${new Date().toISOString()}] Error callback completed in ${elapsed}ms`);
-        } catch (callbackError) {
-          const elapsed = Date.now() - callbackStartTime;
-          console.error(`Failed to send error callback after ${elapsed}ms:`, callbackError.message);
-        }
-      }
+      // Error callback removed - using polling instead
     }
     
     // Note: Response already sent, so we can't send error response here
