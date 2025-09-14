@@ -126,17 +126,24 @@ let activeTasks = 0;
 let totalProcessed = 0;
 
 // Helper function to make API call with retry
-async function callAPIWithRetry(apiUrl, requestBody, apiKey, maxRetries = 3) {
+async function callAPIWithRetry(apiUrl, requestBody, apiKey, maxRetries = 3, taskId = 'unknown') {
   let lastError = null;
-  
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      console.log(`Attempt ${attempt} of ${maxRetries}...`);
-      
+      console.log(`[${taskId}] Attempt ${attempt} of ${maxRetries}...`);
+
       // Create a new AbortController for each attempt
+      console.log(`[${taskId}] Creating AbortController with 4-minute timeout`);
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4 * 60 * 1000); // 4 minutes per attempt
-      
+      const timeoutId = setTimeout(() => {
+        console.log(`[${taskId}] TIMEOUT: Aborting request after 4 minutes`);
+        controller.abort();
+      }, 4 * 60 * 1000); // 4 minutes per attempt
+
+      console.log(`[${taskId}] Sending POST request to ${apiUrl}`);
+      const fetchStartTime = Date.now();
+
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
@@ -146,8 +153,12 @@ async function callAPIWithRetry(apiUrl, requestBody, apiKey, maxRetries = 3) {
         body: JSON.stringify(requestBody),
         signal: controller.signal
       });
-      
+
+      const fetchDuration = ((Date.now() - fetchStartTime) / 1000).toFixed(2);
+      console.log(`[${taskId}] Response received after ${fetchDuration}s, status: ${response.status}`);
+
       clearTimeout(timeoutId);
+      console.log(`[${taskId}] Timeout cleared`);
       
       if (!response.ok) {
         const errorText = await response.text();
@@ -188,19 +199,22 @@ async function callAPIWithRetry(apiUrl, requestBody, apiKey, maxRetries = 3) {
         return response;
       }
     } catch (error) {
-      console.error(`Attempt ${attempt} failed:`, error.message);
+      console.error(`[${taskId}] Attempt ${attempt} failed:`, error.message);
+      console.error(`[${taskId}] Error name: ${error.name}, Stack: ${error.stack?.split('\n')[0]}`);
       lastError = error;
-      
+
       if (error.name === 'AbortError') {
-        console.error('Request timeout');
+        console.error(`[${taskId}] Request aborted - timeout after 4 minutes`);
         lastError = new Error('Request timeout after 4 minutes');
       }
-      
+
       // Wait before retry
       if (attempt < maxRetries) {
         const waitTime = Math.min(1000 * Math.pow(2, attempt), 10000);
-        console.log(`Waiting ${waitTime}ms before retry...`);
+        console.log(`[${taskId}] Waiting ${waitTime}ms before retry...`);
         await wait(waitTime);
+      } else {
+        console.log(`[${taskId}] All ${maxRetries} attempts failed`);
       }
     }
   }
@@ -305,7 +319,8 @@ async function processGeneration(model, prompt, imageUrl, imageUrls, imageSize, 
 
     // Handle multiple image URLs - prioritize imageUrls array, fallback to single imageUrl
     const allImageUrls = imageUrls || (imageUrl ? [imageUrl] : []);
-    console.log(`Processing generation with ${allImageUrls.length} images`);
+    console.log(`[${taskId}] Processing generation with ${allImageUrls.length} images`);
+    console.log(`[${taskId}] Model: ${model}, Size: ${imageSize}`);
     
     // Build request body
     let requestBody;
@@ -364,13 +379,13 @@ async function processGeneration(model, prompt, imageUrl, imageUrls, imageSize, 
       }
     }
 
-    console.log('Calling third-party API with retry logic...');
-    
+    console.log(`[${taskId}] Calling third-party API with retry logic...`);
+
     // Call API with retry
-    const response = await callAPIWithRetry(apiUrl, requestBody, apiKey);
+    const response = await callAPIWithRetry(apiUrl, requestBody, apiKey, 3, taskId);
     
     const duration = (Date.now() - startTime) / 1000;
-    console.log(`API responded successfully in ${duration}s for taskId: ${taskId}`);
+    console.log(`[${taskId}] API call completed successfully in ${duration}s`);
 
     const data = await response.json();
     // 保存原始响应
@@ -599,7 +614,8 @@ app.post('/api/generate', async (req, res) => {
 
     // Handle multiple image URLs - prioritize imageUrls array, fallback to single imageUrl
     const allImageUrls = imageUrls || (imageUrl ? [imageUrl] : []);
-    console.log(`Processing generation with ${allImageUrls.length} images`);
+    console.log(`[${taskId}] Processing generation with ${allImageUrls.length} images`);
+    console.log(`[${taskId}] Model: ${model}, Size: ${imageSize}`);
     
     // Build request body
     let requestBody;
@@ -658,10 +674,10 @@ app.post('/api/generate', async (req, res) => {
       }
     }
 
-    console.log('Calling third-party API with retry logic...');
-    
+    console.log(`[${taskId}] Calling third-party API with retry logic...`);
+
     // Call API with retry
-    const response = await callAPIWithRetry(apiUrl, requestBody, apiKey);
+    const response = await callAPIWithRetry(apiUrl, requestBody, apiKey, 3, taskId);
     
     const duration = (Date.now() - startTime) / 1000;
     console.log(`API responded successfully in ${duration}s`);
