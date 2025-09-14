@@ -1,9 +1,6 @@
 # 单阶段构建 - 更简单的版本
 FROM golang:1.21
 
-# 安装ca-certificates和DNS工具
-RUN apt-get update && apt-get install -y ca-certificates dnsutils && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 
 # 复制所有文件
