@@ -117,6 +117,12 @@ func extractImageURL(data json.RawMessage, model string) (string, error) {
 			content := openAIResp.Choices[0].Message.Content
 			// Extract URL from content using regex-like pattern
 			if content != "" {
+				// Check if generation failed (云雾API error format)
+				if findSubstring(content, "生成失败") != -1 || findSubstring(content, "失败原因") != -1 {
+					// Return the error message as an error
+					return "", fmt.Errorf("generation failed: %s", content)
+				}
+
 				// Look for URL pattern in content
 				startIdx := -1
 				endIdx := -1
@@ -495,21 +501,24 @@ func processGeneration(req GenerateRequest) {
 		log.Printf("[%s] Failed to extract image URL: %v", taskID, err)
 		log.Printf("[%s] Full response: %s", taskID, string(responseData))
 
-		// Store error result with raw response
+		// Extract detailed error message
+		errorMsg := err.Error()
+
+		// Store error result with raw response and detailed error
 		taskResults.Store(taskID, TaskResult{
 			Success:     false,
-			Error:       "Failed to extract image URL from response",
+			Error:       errorMsg,
 			RawResponse: responseData,
 			Timestamp:   time.Now().Format(time.RFC3339),
 		})
 
-		// Send failure callback
+		// Send failure callback with detailed error
 		if req.CallbackURL != "" {
 			sendCallback(req.CallbackURL, CallbackPayload{
 				TaskID:       taskID,
 				ParentTaskID: req.ParentTaskID,
 				Status:       "failed",
-				Error:        "Failed to extract image URL",
+				Error:        errorMsg,
 			})
 		}
 	} else {
